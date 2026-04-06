@@ -17,7 +17,7 @@ public class RateLimiting {
 
 	public Bucket getBucketForIP(String ip){
 		return buckets.computeIfAbsent(ip, k -> {
-			Bandwidth limit = Bandwidth.classic(1000, Refill.greedy(20, Duration.ofMinutes(1)));
+			Bandwidth limit = Bandwidth.classic(20, Refill.greedy(20, Duration.ofMinutes(1)));
 			return Bucket.builder().addLimit(limit).build();
 		});
 	}
