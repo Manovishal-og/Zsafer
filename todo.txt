@@ -1,0 +1,4 @@
+
+1) Before adding and encrypting sennderEmail , the whole application is working
+2) 
+

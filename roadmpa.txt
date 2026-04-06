@@ -1,0 +1,62 @@
+1) Understand the Problem Clearly
+	Ask yourself:
+		What exactly does this service do?
+			It use to create 1 time viewable data,
+		Who uses it? CLI user and a  API consumer?
+		What are the core rules? (one-time view, TTL expiry, encryption)
+
+2) Define the Features
+
+	Split into Must Have vs Nice to Have
+
+		Must Have    						Nice to Have
+		Create a secret   				Password-protected secrets
+		Generate unique token  			Admin dashboard
+		Retrieve once & destroy  		Email notification on access
+		TTL-based expiry				
+
+
+3. Design the Architecture
+
+	Decide:
+		Backend → Spring Boot REST API
+		Storage → MySQL
+		CLI → dart and bash
+		Encryption → cryptography library (Fernet/AES-256)
+
+	NOTE:
+		--> Encryption: Use AES-256 (Symmetric) to encrypt the content.
+		--> Key Management: The AES key is never stored in the database. Instead, it is part of the unique URL you give the user.
+		--> Integrity: Use SHA-256 to generate the unique identifier for the URL.
+
+4. Design the Database Schema
+	secrets table:
+		- id (token) → unique string (Generally the AES keey to encrypt or decrypt but it is stored in the form of hash usinh SHA 256)
+		- encrypted_content → blob
+		- created_at → timestamp
+		- expires_at → timestamp
+		- is_viewed → boolean
+
+5.  Define Your API Endpoints
+
+	POST /secret        → Create a secret, returns the key
+	GET  /secret/<key> → Retrieve & destroy secret
+
+6.  Draw the Flow Diagram
+
+	User (CLI)
+	   │
+	   ├── create secret ──► POST /secret ──► Encrypt ──► Store in DB ──► Return key
+	   │
+	   └── get secret ────► GET /secret/<key> ──► Check TTL & viewed
+													  │
+								  ┌───────────────────┴──────────────────┐
+							   Valid                                   Expired/Used
+								  │                                       │
+							 Decrypt & return                      Return 404/error
+							 Mark as viewed
+
+
+
+
+

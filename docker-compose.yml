@@ -1,0 +1,17 @@
+services:
+  mysql-db:
+    image: mysql/mysql-server:8.0
+    container_name: ephemeral-mysql
+    command: --max-allowed_packet=500M  
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: ephemeral_sharing_db
+      MYSQL_USER: user_zamipter
+      MYSQL_PASSWORD: user_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+
+volumes:
+  db_data:
