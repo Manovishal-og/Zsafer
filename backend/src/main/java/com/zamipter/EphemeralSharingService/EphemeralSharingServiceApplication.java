@@ -5,7 +5,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
-import com.zamipter.EphemeralSharingService.Service.KeyGenerationService;
+import com.zamipter.EphemeralSharingService.service.KeyGenerationService;
 
 @SpringBootApplication
 @EnableScheduling

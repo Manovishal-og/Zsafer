@@ -2,3 +2,8 @@
 1) Before adding and encrypting sennderEmail , the whole application is working
 2) 
 
+
+
+
+zsafer -f filename -s sender email -p password -r receriveremail
+
