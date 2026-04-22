@@ -56,8 +56,8 @@ public class EphemeralController {
 		@RequestParam("expiry") int seconds,
 		@RequestParam(value = "password", required = false) String password,
 		@RequestParam(value = "duration") Integer duration,
-		@RequestParam(value = "receiverEmail") String toEmail,
-		@RequestParam(value = "senderEmail", required = false) String fromEmail,
+		@RequestParam(value = "receiverEmail" ) String toEmail,
+		@RequestParam(value = "senderEmail" ) String fromEmail,
 		HttpServletRequest request
 	) throws Exception {
 
@@ -206,7 +206,9 @@ public class EphemeralController {
 		// 7. Initial Access: Start the Burn Timer
 		if (secret.getBurnAt() == null) {
 			secret.setIsViewed(true);
-			secret.setBurnAt(LocalDateTime.now().plusSeconds(secret.getDuration()));
+			if (secret.getDuration() != -1) {
+				secret.setBurnAt(LocalDateTime.now().plusSeconds(secret.getDuration()));
+			}
 			repository.save(secret);
 		}
 
