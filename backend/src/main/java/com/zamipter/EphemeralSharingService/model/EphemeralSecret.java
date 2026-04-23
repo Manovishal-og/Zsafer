@@ -4,6 +4,7 @@ import java.time.LocalDateTime;
 
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Lob;
 import jakarta.persistence.Column;
 
@@ -27,13 +28,14 @@ public class EphemeralSecret {
 	private Boolean isViewed = false;
 	private int duration;
 	private LocalDateTime burnAt;
-	private String senderEmail;
+	private User senderEmail;
 	
-
+@JoinColumn(name = "user_id")
+    private User sender;
 	// Default Constructor is needed for Spring JPA
 	public EphemeralSecret() {}
 
-	public EphemeralSecret( String id ,  byte[] data , String fileName , LocalDateTime cTime , LocalDateTime eTime , String ContentType , byte[] salt, int duration , String email){
+	public EphemeralSecret( String id ,  byte[] data , String fileName , LocalDateTime cTime , LocalDateTime eTime , String ContentType , byte[] salt, int duration , User sender){
 		this.id = id;
 		this.data = data;
 		this.fileName = fileName;
@@ -42,7 +44,7 @@ public class EphemeralSecret {
 		this.ContentType = ContentType;
 		this.salt = salt;
 		this.duration = duration;
-;		this.senderEmail = email;
+		this.sender = sender;
 	}
 
 	public String getId() { return id; }
@@ -75,8 +77,7 @@ public class EphemeralSecret {
 	public LocalDateTime getBurnAt(){ return burnAt;}
 	public void setBurnAt (LocalDateTime duration){ this.burnAt = duration;	}
 
-	public String getSenderEmail(){ return senderEmail;}
-	public void setSenderEmail (String email){ this.senderEmail = email;	}
-
+	public User getSender() { return sender; }
+    public void setSender(User sender) { this.sender = sender; }
 
 }
