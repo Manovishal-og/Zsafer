@@ -1,10 +1,22 @@
 
-1) Before adding and encrypting sennderEmail , the whole application is working
-2) 
-
-
 
 
 zsafer send -f filename -r receriveremail@gmail -s sender_email@gmail -p password 
 zafer message
 zsafer get 
+
+
+
+
+
+2) How does zsafer message command get its notification
+	i) What request paramater is sent
+	ii) What should be sent from backend
+	
+
+
+find receiver using toEmail 
+	i) if yes , then give a notify message to the receiver and to the sender
+	ii) if not , give bad request
+
+

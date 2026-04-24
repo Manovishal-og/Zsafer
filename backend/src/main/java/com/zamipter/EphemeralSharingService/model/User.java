@@ -1,5 +1,6 @@
 package com.zamipter.EphemeralSharingService.model;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import jakarta.persistence.*;
@@ -20,27 +21,21 @@ public class User {
 	@Column(nullable = false)
 	private String passwordHash;
 
-	// THE BRIDGE: This is the Master Key, encrypted by your password.
-	// You need this to unlock the fields below.
-	@Lob
-	@Column(columnDefinition = "BLOB")
-	private byte[] masterKeyBlob; 
+	@Column(unique = true, nullable = false)
+	private String emailHash;
+
 
 	// These are encrypted using the Master Key (NOT the password directly)
-	private String encryptedUsername; 
-	private String encryptedEmail;
+	private String username; 
+	private String email;
+	private ArrayList<String> notification;
 
-	@Lob
-	@Column(columnDefinition = "BLOB")
-	private byte[] salt;
 
 	@OneToMany(mappedBy = "sender", cascade = CascadeType.ALL, orphanRemoval = true)
 	private List<EphemeralSecret> mySecrets;
 
 	public User() {}
 
-	public byte[] getSalt() { return salt; }
-	public void setSalt(byte[] salt) { this.salt = salt; }
 
 	// Getters and Setters
 	public Long getId() { return id; }
@@ -52,24 +47,34 @@ public class User {
 	public String getPasswordHash() { return passwordHash; }
 	public void setPasswordHash(String passwordHash) { this.passwordHash = passwordHash; }
 
-	public byte[] getMasterKeyBlob() { return masterKeyBlob; }
-	public void setMasterKeyBlob(byte[] masterKeyBlob) { this.masterKeyBlob = masterKeyBlob; }
 
-	public String getEncryptedUsername() { return encryptedUsername; }
-	public void setEncryptedUsername(String encryptedUsername) { this.encryptedUsername = encryptedUsername; }
+	public String getUsername() { return username; }
+	public void setUsername(String username) { this.username = username; }
 
-	public String getEncryptedEmail() { return encryptedEmail; }
-	public void setEncryptedEmail(String encryptedEmail) { this.encryptedEmail = encryptedEmail; }
+	public String getEmail() { return email; }
+	public void setEmail(String email) { this.email = email; }
+
+	public ArrayList<String> getNotification() { return notification; }
+	public void setNotification(String notification) { this.notification.add(notification); }
+	public void setNotification(ArrayList<String> notification) {
+		if (notification == null) {
+			this.notification = new ArrayList<>();
+		} else {
+			this.notification = notification;
+		}
+	}
+	public void deleteViewedNotification(){ this.notification.clear();}
 
 	public List<EphemeralSecret> getMySecrets() { return mySecrets; }
 	public void setMySecrets(List<EphemeralSecret> mySecrets) { this.mySecrets = mySecrets; }
+
 
 	@Override
 	public String toString() {
 		return "User{" +
 		"id=" + id +
 		", usernameHash='" + usernameHash + '\'' +
-		", email='" + encryptedEmail + '\'' +
+		", email='" + email + '\'' +
 		'}';
 	}
 }

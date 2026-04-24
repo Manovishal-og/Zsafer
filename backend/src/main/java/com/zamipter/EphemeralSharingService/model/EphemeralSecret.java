@@ -28,14 +28,13 @@ public class EphemeralSecret {
 	private Boolean isViewed = false;
 	private int duration;
 	private LocalDateTime burnAt;
-	private User senderEmail;
 	
 @JoinColumn(name = "user_id")
-    private User sender;
+    private User user;
 	// Default Constructor is needed for Spring JPA
 	public EphemeralSecret() {}
 
-	public EphemeralSecret( String id ,  byte[] data , String fileName , LocalDateTime cTime , LocalDateTime eTime , String ContentType , byte[] salt, int duration , User sender){
+	public EphemeralSecret( String id ,  byte[] data , String fileName , LocalDateTime cTime , LocalDateTime eTime , String ContentType , byte[] salt, int duration , User user){
 		this.id = id;
 		this.data = data;
 		this.fileName = fileName;
@@ -44,7 +43,7 @@ public class EphemeralSecret {
 		this.ContentType = ContentType;
 		this.salt = salt;
 		this.duration = duration;
-		this.sender = sender;
+		this.user = user;
 	}
 
 	public String getId() { return id; }
@@ -77,7 +76,7 @@ public class EphemeralSecret {
 	public LocalDateTime getBurnAt(){ return burnAt;}
 	public void setBurnAt (LocalDateTime duration){ this.burnAt = duration;	}
 
-	public User getSender() { return sender; }
-    public void setSender(User sender) { this.sender = sender; }
+	public User getuser() { return user; }
+    public void setuser(User user) { this.user = user; }
 
 }

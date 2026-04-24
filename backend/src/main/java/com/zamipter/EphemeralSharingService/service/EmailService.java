@@ -15,7 +15,7 @@ public class EmailService {
     private JavaMailSender mailSender;
 
     @Async // Runs in background so the API stays fast
-    public void sendSecretNotification(String toEmail, String downloadUrl, int expirySeconds, String password) {
+    public void sendSecretNotificationEmail(String toEmail, String downloadUrl, int expirySeconds, String password) {
 		String time;
 		if(TimeUnit.SECONDS.toDays(expirySeconds) > 1){
 			 time = TimeUnit.SECONDS.toDays(expirySeconds) + " days";
@@ -43,7 +43,8 @@ public class EmailService {
         mailSender.send(message);
     }
 
-	public void sendAccessNotification(String recipientEmail, String fileName) {
+	@Async
+	public void sendAccessNotificationEmail(String recipientEmail, String fileName) {
         if (recipientEmail == null || recipientEmail.isEmpty()) return;
 
         SimpleMailMessage message = new SimpleMailMessage();
@@ -54,4 +55,14 @@ public class EmailService {
         
         mailSender.send(message);
     }
+
+	public void greetUserEmail(String email , String userName , String password ){
+		if (email == null || email.isEmpty()) return;
+		
+		SimpleMailMessage message = new SimpleMailMessage();
+		message.setTo(email);
+		message.setSubject("New Zsafer Account is created ");
+		message.setText("Your username : "+userName+"\n Your Password : "+password);
+		mailSender.send(message);
+	}
 }

@@ -6,7 +6,9 @@ import com.zamipter.EphemeralSharingService.model.User;
 
 public interface UserRepository extends JpaRepository<User , String>{
 
-	User findByUsernameHash(String hash);
+	java.util.Optional<User> findByUsernameHash(String hash);
+    java.util.Optional<User> findByApiToken(String token);
+	java.util.Optional<User> findByEmailHash(String email);
 } 
 
 	
