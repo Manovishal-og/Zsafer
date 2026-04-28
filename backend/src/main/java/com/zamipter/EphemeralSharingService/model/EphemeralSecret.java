@@ -24,6 +24,7 @@ public class EphemeralSecret {
 	private String ContentType;
 	private LocalDateTime createdAt;
 	private LocalDateTime expiredAt;
+
 	@Column(nullable = false, columnDefinition = "TINYINT(1) DEFAULT 0")
 	private Boolean isViewed = false;
 	private int duration;
@@ -31,10 +32,12 @@ public class EphemeralSecret {
 	
 @JoinColumn(name = "user_id")
     private User user;
+
+
 	// Default Constructor is needed for Spring JPA
 	public EphemeralSecret() {}
 
-	public EphemeralSecret( String id ,  byte[] data , String fileName , LocalDateTime cTime , LocalDateTime eTime , String ContentType , byte[] salt, int duration , User user){
+	public EphemeralSecret( String id ,  byte[] data , String fileName , LocalDateTime cTime , LocalDateTime eTime , String ContentType , byte[] salt, int duration , User user ){
 		this.id = id;
 		this.data = data;
 		this.fileName = fileName;
@@ -78,5 +81,6 @@ public class EphemeralSecret {
 
 	public User getuser() { return user; }
     public void setuser(User user) { this.user = user; }
+
 
 }

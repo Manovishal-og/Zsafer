@@ -56,7 +56,7 @@ public class EmailService {
         mailSender.send(message);
     }
 
-	public void greetUserEmail(String email , String userName , String password ){
+	public void greetUserEmail(String email , String userName   ){
 		if (email == null || email.isEmpty()) return;
 		
 		SimpleMailMessage message = new SimpleMailMessage();

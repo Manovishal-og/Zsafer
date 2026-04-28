@@ -1,5 +1,6 @@
 package com.zamipter.EphemeralSharingService.service;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import javax.crypto.*;
 import javax.crypto.spec.*;
@@ -17,7 +18,12 @@ public class KeyGenerationService {
     private static final int IV_SIZE = 12;
     private static final int TAG_BIT_LENGTH = 128;
     private static final String ALGO = "AES/GCM/NoPadding";
+    private final SecretKey serverKey;
 
+    public KeyGenerationService(@Value("${app.encryption.key}") String hexKey) {
+        byte[] keyBytes = HexFormat.of().parseHex(hexKey);
+        this.serverKey = new SecretKeySpec(keyBytes, "AES");
+    }
     // --- KEY GENERATION & HASHING ---
 
     public SecretKey getSecretKey() throws Exception {
@@ -54,11 +60,17 @@ public class KeyGenerationService {
         return ByteBuffer.allocate(IV_SIZE + cipherText.length).put(iv).put(cipherText).array();
     }
 
-	public ArrayList<String> encrypt(ArrayList<String> arrayList, String key) {
+
+	public String encrypt(String text) throws Exception{
+		return encrypt(text, serverKey);
+	}
+
+
+	public ArrayList<String> encrypt(ArrayList<String> arrayList) {
 		arrayList.replaceAll(s -> {
 			try {
 				// Call the individual string encryption method
-				return encrypt(s, key); 
+				return encrypt(s, serverKey); 
 			} catch (Exception e) {
 				// Re-throw as a RuntimeException so the compiler is happy
 				throw new RuntimeException("Encryption failed for string: " + s, e);
@@ -109,7 +121,7 @@ public class KeyGenerationService {
 		arrayList.replaceAll(s -> {
 			try {
 				// Call the individual string encryption method
-				return decrypt(s, key); 
+				return decrypt(s, serverKey); 
 			} catch (Exception e) {
 				// Re-throw as a RuntimeException so the compiler is happy
 				throw new RuntimeException("Decryption failed for string: " + s, e);
@@ -147,7 +159,9 @@ public class KeyGenerationService {
         return new String(decryptedBytes, StandardCharsets.UTF_8);
     }
 
-
+    public String decrypt(String base64CipherText) throws Exception {
+        return decrypt(base64CipherText, serverKey);  // calls existing (String, SecretKey) overload
+    }
 
     public byte[] decrypt(byte[] encryptedDataWithIv, SecretKey key) throws Exception {
         ByteBuffer bb = ByteBuffer.wrap(encryptedDataWithIv);

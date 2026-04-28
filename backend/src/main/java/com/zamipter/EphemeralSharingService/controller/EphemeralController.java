@@ -5,6 +5,7 @@ import java.time.LocalDateTime;
 import java.util.Set;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -70,36 +71,29 @@ public class EphemeralController {
 	public ResponseEntity<?> createUser(@RequestBody Map<String, String> payload) {
 		try {
 			String username = payload.get("username");
-			String password = payload.get("password");
 			String email = payload.get("email");
 
-			if (username == null || password == null || email == null) {
+			if (username == null || email == null) {
 				return ResponseEntity.badRequest().body("Missing required fields");
 			}
 
-			emailService.greetUserEmail( email ,  username , password);
+			emailService.greetUserEmail( email ,  username );
 			String notification = "New Account is created in zsafer ";
 
 			// 1. Generate Shadow Hashes (SHA-256) for database searching
 			String usernameHash = keyService.hashKey(username);
-
-			// 2. Securely Hash Password for authentication (BCrypt)
-			String passwordHash = keyService.hashKey(password);
-
 			String apiToken = java.util.UUID.randomUUID().toString();
 
-			// 3. Encrypt Identity Fields using the apiToken
-			String encryptedUsername = keyService.encrypt(username, apiToken);
-			String encryptedEmail = keyService.encrypt(email, apiToken);
-			String encryptedNotification = keyService.encrypt(notification, apiToken);
 
-			// 4. Persist the User
+			// 2. Persist the User
 			User newUser = new User();
 			newUser.setUsernameHash(usernameHash);
-			newUser.setPasswordHash(passwordHash);
-			newUser.setUsername(encryptedUsername);
-			newUser.setEmail(encryptedEmail);
-			newUser.setNotification(encryptedNotification);
+			newUser.setUsername(keyService.encrypt(username));
+
+			newUser.setEmail(keyService.encrypt(email));
+			newUser.setEmailHash(keyService.hashKey(email));
+			newUser.setApiToken(keyService.hashKey(apiToken));
+			newUser.addNotification(keyService.encrypt(notification));
 			userRepository.save(newUser);
 
 			Map<String, String> response = new java.util.HashMap<>();
@@ -118,23 +112,22 @@ public class EphemeralController {
 
 
 
-	@GetMapping("/message")
-	public ResponseEntity<?> accessNotification(@RequestBody Map<String, String> payload){
+	@GetMapping("/{usernamehash}/message")
+	public ResponseEntity<?> accessNotification(@PathVariable String usernameHash , @RequestBody Map<String, String> payload){
 		try{
 
-			String usernameHash = payload.get("usernamehash");
 			String apiToken = payload.get("apitoken");
 			if (usernameHash == null || apiToken == null ) {
 				return ResponseEntity.badRequest().body("Missing required fields");
 			}
 
 			User searchedUser = userService.validateUserSession(apiToken, usernameHash);
-			ArrayList<String> notification = searchedUser.getNotification();
+			User decryptedUser = userService.decryptUser(searchedUser);
+			List<String> notification = decryptedUser.getNotification();
 			return ResponseEntity.ok(notification);
 		}
 
 		catch (RuntimeException e) {
-			// Catch validation errors (e.g., "Invalid or expired session token")
 			return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(e.getMessage());
 
 		}
@@ -154,12 +147,10 @@ public class EphemeralController {
 			if ( apiToken == null ) {
 				return ResponseEntity.badRequest().body("Missing required fields");
 			}
-
 			User searchedUser = userService.validateUserSession(apiToken, usernameHash);
 			searchedUser.deleteViewedNotification();
 			userRepository.save(searchedUser);
 			return ResponseEntity.ok("Viewed notifications cleared successfully.");
-			
 		} 
 
 		catch(RuntimeException e){
@@ -174,15 +165,14 @@ public class EphemeralController {
 
 	}
 
-
 	@PostMapping("/secret")
 	public ResponseEntity<?> uploadSecret(
 		@RequestParam("file") MultipartFile file,
 		@RequestParam("expiry") int seconds,
 		@RequestParam(value = "dataAccessPassword", required = false) String dataAccessPassword,
 		@RequestParam(value = "duration") Integer duration,
-		@RequestParam(value = "receiverEmail" ) String toEmail,
-		@RequestParam(value = "sender" ) String usernameHash,
+		@RequestParam(value = "receiverEmail" ) String receiverEmail,
+		@RequestParam(value = "sender" ) String senderUsernameHash,
 		@RequestParam(value = "apitoken") String apiToken,
 		HttpServletRequest request
 	) throws Exception {
@@ -192,18 +182,21 @@ public class EphemeralController {
 			throw new RateLimitException("Slow down! You've reached your upload limit.");
 		}
 
-		User receiver = userRepository.findByEmailHash(keyService.hashKey(toEmail))
-				.orElseThrow(() -> new RuntimeException("Invalid emailid"));
+		
 		// 2. Validation
-		User validatedUser = userService.validateUserSession(apiToken, usernameHash);
+		String receiverEmailHash = keyService.hashKey(receiverEmail);
+		User validatedReceiver = userRepository.findByEmailHash(receiverEmailHash)
+				.orElseThrow(() -> new RuntimeException("No user exists with that email in zsafer"));
+		String toEmail = validatedReceiver.getEmail();
+		User validatedSender = userService.validateUserSession(apiToken, senderUsernameHash);
+
 		String fileName = file.getOriginalFilename();
 		if (fileName == null || !fileName.contains(".")) {
 			return ResponseEntity.badRequest().body("Invalid file name.");
 		}
 
-		// Decrypt the validatedUser using apiToken
-		User decryptedUser = userService.decryptUser(validatedUser, apiToken);
-
+		// Decrypt the validatedSender using apiToken
+		User decryptedSender = userService.decryptUser(validatedSender);
 		String extension = fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase();
 		if (!allowedExtension.contains(extension)) {
 			return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
@@ -218,26 +211,19 @@ public class EphemeralController {
 		// 3. Layer 1 Encryption: User Password
 		byte[] currentData = file.getBytes();
 		byte[] salt = null;
-		String processingFromEmail = (decryptedUser.getEmail() != null) ? decryptedUser.getEmail() : "";
 
 		if (dataAccessPassword != null && !dataAccessPassword.isBlank()) {
 			salt = new byte[16];
 			new java.security.SecureRandom().nextBytes(salt);
 			SecretKey passwordKey = keyService.deriveKeyFromPassword(dataAccessPassword, salt);
 			currentData = keyService.encrypt(currentData, passwordKey);
-
-			if (!processingFromEmail.isEmpty()) {
-				processingFromEmail = keyService.encrypt(processingFromEmail, passwordKey);
-			}
 		}
 
 		// 4. Layer 2 Encryption: System Key (Lives only in URL)
 		SecretKey systemKey = keyService.getSecretKey();
 		String id = keyService.convertToBase64(systemKey);
 		String hid = keyService.hashKey(id);
-
 		byte[] finalEncryptedData = keyService.encrypt(currentData, systemKey);
-		String finalEncryptedSenderEmail = keyService.encrypt(processingFromEmail, systemKey);
 
 		// 5. Metadata and Storage
 		String type = org.springframework.http.MediaTypeFactory
@@ -246,21 +232,22 @@ public class EphemeralController {
 		.orElse("application/octet-stream");
 
 		LocalDateTime eTime = LocalDateTime.now().plusSeconds(seconds);
-		String currentUsernameHash = keyService.hashKey(request.getHeader("X-ZSafer-Username"));
-		User sender = userRepository.findByUsernameHash(currentUsernameHash)
-		.orElseThrow(() -> new RuntimeException("User not found"));
 
 		secretRepository.save(new EphemeralSecret(
 			hid, finalEncryptedData, fileName, LocalDateTime.now(), 
-			eTime, type, salt, duration , sender
+			eTime, type, salt, duration , decryptedSender 
 		));
 
 		// 6. Notify Receiver
 		emailService.sendSecretNotificationEmail(toEmail, id, seconds, dataAccessPassword);
-		emailService.
+		String notificationMessage = "You have received a new file from " + decryptedSender.getUsername();
+		if (validatedReceiver.getApiToken() != null) {
+			String encryptedNotification = keyService.encrypt(notificationMessage, validatedReceiver.getApiToken());
+			validatedReceiver.addNotification(encryptedNotification);
+			userRepository.save(validatedReceiver);
+		}
 
-		return ResponseEntity.status(HttpStatus.CREATED)
-		.body(new SecretResponse("File Uploaded successfully!", id, eTime));
+		return ResponseEntity.status(HttpStatus.CREATED).body(new SecretResponse("File Uploaded successfully!", id, eTime));
 	}
 
 	@GetMapping(path = "/secret/{key}")
@@ -323,9 +310,9 @@ public class EphemeralController {
 			// Password Layer
 			if (secret.getSalt() != null) {
 				SecretKey passwordKey = keyService.deriveKeyFromPassword(password, secret.getSalt());
-				finalData = keyService.decryptWithSecretKey(intermediate, passwordKey);
+				finalData = keyService.decrypt(intermediate, passwordKey);
 				if (partialSenderEmail != null && !partialSenderEmail.isEmpty()) {
-					originalSenderEmail = keyService.decryptStringWithSecretKey(partialSenderEmail, passwordKey);
+					originalSenderEmail = keyService.decrypt(partialSenderEmail, passwordKey);
 				}
 			} else {
 				finalData = intermediate;
@@ -337,7 +324,7 @@ public class EphemeralController {
 
 		// 6. Access Notification
 		if (originalSenderEmail != null && !originalSenderEmail.isBlank()) {
-			emailService.sendAccessNotificationEmail(recipientEmail, fileName);
+			emailService.sendAccessNotificationEmail(originalSenderEmail, secret.getFileName());
 		}
 
 		// 7. Initial Access: Start the Burn Timer

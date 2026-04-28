@@ -9,27 +9,27 @@ import jakarta.persistence.*;
 @Table(name = "users")
 public class User {
 
-	@Id
-	@GeneratedValue(strategy = GenerationType.IDENTITY)
-	private Long id;
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;                    // internal only — never encrypted, never exposed
 
-	// Hashed for searching during login (SHA-256)
-	@Column(unique = true, nullable = false)
-	private String usernameHash;
+    @Column(unique = true, nullable = false)
+    private String usernameHash;        // SHA-256 hash — already not reversible, no encryption needed
 
-	// Hashed for verifying identity (BCrypt)
-	@Column(nullable = false)
-	private String passwordHash;
+    @Column(unique = true, nullable = false)
+    private String emailHash;           // SHA-256 hash — same, no encryption needed
 
-	@Column(unique = true, nullable = false)
-	private String emailHash;
+    private String apiToken;            // authentication token — not encrypted, but never returned after registration
 
+    private String username;            // not sensitive — no encryption needed
 
-	// These are encrypted using the Master Key (NOT the password directly)
-	private String username; 
-	private String email;
-	private ArrayList<String> notification;
+    @Column(columnDefinition = "TEXT")
+    private String email;               // ✅ ENCRYPT — plaintext email is PII
 
+    @ElementCollection(fetch = FetchType.EAGER)
+    @CollectionTable(name = "user_notifications", joinColumns = @JoinColumn(name = "user_id"))
+    @Column(name = "notification", columnDefinition = "TEXT")
+    private List<String> notification; 
 
 	@OneToMany(mappedBy = "sender", cascade = CascadeType.ALL, orphanRemoval = true)
 	private List<EphemeralSecret> mySecrets;
@@ -44,9 +44,11 @@ public class User {
 	public String getUsernameHash() { return usernameHash; }
 	public void setUsernameHash(String usernameHash) { this.usernameHash = usernameHash; }
 
-	public String getPasswordHash() { return passwordHash; }
-	public void setPasswordHash(String passwordHash) { this.passwordHash = passwordHash; }
+	public String getApiToken() { return apiToken; }
+	public void setApiToken(String apiToken) { this.apiToken = apiToken; }
 
+	public String getEmailHash() { return emailHash; }
+	public void setEmailHash(String emailHash) { this.emailHash = emailHash; }
 
 	public String getUsername() { return username; }
 	public void setUsername(String username) { this.username = username; }
@@ -54,15 +56,11 @@ public class User {
 	public String getEmail() { return email; }
 	public void setEmail(String email) { this.email = email; }
 
-	public ArrayList<String> getNotification() { return notification; }
-	public void setNotification(String notification) { this.notification.add(notification); }
-	public void setNotification(ArrayList<String> notification) {
-		if (notification == null) {
-			this.notification = new ArrayList<>();
-		} else {
-			this.notification = notification;
-		}
-	}
+	public List<String> getNotification() { 	return notification; }
+	public void addNotification(String notification) { this.notification.add(notification); }
+	public void setNotification(List<String> notification) {this.notification = (notification != null) ? notification : new ArrayList<>();}
+	public void clearNotifications() { 	this.notification.clear(); 
+}
 	public void deleteViewedNotification(){ this.notification.clear();}
 
 	public List<EphemeralSecret> getMySecrets() { return mySecrets; }
