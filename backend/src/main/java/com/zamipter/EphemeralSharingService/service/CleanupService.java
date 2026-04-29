@@ -23,7 +23,7 @@ public class CleanupService {
 
 	}
 
-	@Scheduled(fixedDelay = 30000)
+	@Scheduled(fixedDelay = 3000)
 	public void performMaintenance(){
 		repository.deleteByBurnAtBefore(LocalDateTime.now());
 	}

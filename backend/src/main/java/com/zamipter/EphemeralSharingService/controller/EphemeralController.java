@@ -38,6 +38,7 @@ import com.zamipter.EphemeralSharingService.service.UserService;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.transaction.Transactional;
 
 @RestController
 public class EphemeralController {
@@ -290,7 +291,6 @@ public class EphemeralController {
         secret.setDuration(duration);
         secret.setSender(validatedSender);            // JPA-managed entity — correct FK
         secret.setReceiver(receiver);                 // JPA-managed entity — correct FK
-
         secretRepository.save(secret);
 
         // 10. Email the receiver — use decrypted email for actual sending
@@ -300,6 +300,7 @@ public class EphemeralController {
                 expirySeconds,
                 dataAccessPassword
 		);
+
 
         // 11. Add in-app notification to receiver
         // IMPORTANT: add to `receiver` (JPA-managed entity), then save `receiver`.
@@ -327,113 +328,127 @@ public class EphemeralController {
     //  Sender is notified ONCE (on first access), not on every subsequent view.
     // =========================================================================
 
-    @GetMapping("/secret/{key}")
-    public ResponseEntity<?> download(
-            @PathVariable("key")                                          String key,
-            @RequestParam(value = "password", required = false)          String dataAccessPassword,
-            @RequestHeader(value = HttpHeaders.RANGE, required = false)  String rangeHeader,
-            @RequestHeader(value = HttpHeaders.USER_AGENT, required = false) String userAgent,
-            HttpServletRequest request,
-            HttpServletResponse httpResponse) throws Exception {
+	@Transactional
+	@GetMapping("/secret/{key}")
+	public ResponseEntity<?> download(
+		@PathVariable("key")                                          String key,
+		@RequestParam(value = "password", required = false)          String dataAccessPassword,
+		@RequestHeader(value = HttpHeaders.RANGE, required = false)  String rangeHeader,
+		@RequestHeader(value = HttpHeaders.USER_AGENT, required = false) String userAgent,
+		HttpServletRequest request,
+		HttpServletResponse httpResponse) throws Exception {
 
-        // 1. Rate limit
-        if (!rateLimitingService.checkRequestAvailable(request.getRemoteAddr())) {
-            throw new RateLimitException("Too many attempts.");
-        }
+		// 1. Rate limit
+		if (!rateLimitingService.checkRequestAvailable(request.getRemoteAddr())) {
+			throw new RateLimitException("Too many attempts.");
+		}
 
-        // 2. Lookup
-        String          hid    = keyService.hashKey(key);
-        EphemeralSecret secret = secretRepository.findById(hid)
-                .orElseThrow(() -> new RuntimeException("Secret not found or already burned."));
-		User sender = userService.decryptUser(secret.getSender());
+		// 2. Lookup — atomic claim
+		String hid = keyService.hashKey(key);
+		EphemeralSecret secret = secretRepository.findById(hid).orElse(null);
+
+		if (secret == null) {
+			return ResponseEntity.status(HttpStatus.GONE)
+			.body("This link has already been used or does not exist.");
+		}
+
+		if (Boolean.TRUE.equals(secret.getIsViewed())) {
+			secretRepository.delete(secret);
+			return ResponseEntity.status(HttpStatus.GONE)
+			.body("This link has already been used.");
+		}
+
+		// Claim it immediately before anything else
+		secret.setIsViewed(true);
+		secretRepository.saveAndFlush(secret);
+
+		// 3. Hard expiry check
+		if (LocalDateTime.now().isAfter(secret.getExpiredAt())) {
+			secretRepository.delete(secret);
+			return ResponseEntity.status(HttpStatus.GONE).body("This link has expired.");
+		}
+
+		// 4. Password gate
+		if (secret.getSalt() != null && (dataAccessPassword == null || dataAccessPassword.isBlank())) {
+			if (userAgent != null && userAgent.contains("zsafer-cli")) {
+				return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+				.body("Password required. Retry with ?password=<value>");
+			}
+			String html = "<html><body><script>" +
+			"var p=prompt('This file is password protected. Enter password:');" +
+			"if(p){window.location.search='password='+encodeURIComponent(p);}" +
+			"else{document.body.innerText='Access cancelled.';}" +
+			"</script></body></html>";
+			return ResponseEntity.ok().contentType(MediaType.TEXT_HTML).body(html.getBytes());
+		}
+
+		// 5. Decrypt
+		User sender   = userService.decryptUser(secret.getSender());
 		User receiver = userService.decryptUser(secret.getReceiver());
 
-        // 3. Password gate — single check, placed before expiry check
-        if (secret.getSalt() != null && (dataAccessPassword == null || dataAccessPassword.isBlank())) {
-            if (userAgent != null && userAgent.contains("zsafer-cli")) {
-                return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                        .body("Password required. Retry with ?password=<value>");
-            }
-            String html = "<html><body><script>" +
-                    "var p=prompt('This file is password protected. Enter password:');" +
-                    "if(p){window.location.search='password='+encodeURIComponent(p);}" +
-                    "else{document.body.innerText='Access cancelled.';}" +
-                    "</script></body></html>";
-            return ResponseEntity.ok().contentType(MediaType.TEXT_HTML).body(html.getBytes());
-        }
+		byte[] finalData;
+		try {
+			byte[] intermediate = keyService.decrypt(secret.getData(), key);
+			if (secret.getSalt() != null) {
+				SecretKey passwordKey = keyService.deriveKeyFromPassword(dataAccessPassword, secret.getSalt());
+				finalData = keyService.decrypt(intermediate, passwordKey);
+			} else {
+				finalData = intermediate;
+			}
+		} catch (Exception e) {
+			throw new RuntimeException("Decryption failed. Wrong password or corrupted link.");
+		}
 
-        // 4. Burn-window check
-        if (secret.getBurnAt() != null && LocalDateTime.now().isAfter(secret.getBurnAt())) {
-            secretRepository.delete(secret);
-            throw new RuntimeException("Secret has expired and been burned.");
-        }
+		// 6. Notify sender on first (and only) access
+		if (sender.getEmail() != null && !sender.getEmail().isBlank()) {
+			emailService.sendAccessNotificationEmail(sender.getEmail(), secret.getFileName());
+			User managedSender = secret.getSender();
+			managedSender.addNotification(keyService.encrypt(
+				"Your file was accessed by " + receiver.getUsername()
+			));
+			userRepository.save(managedSender);
+		}
 
-        // 5. Decryption — remove Layer 2, then Layer 1
-        byte[] finalData;
-        String originalSenderEmail = "";
-        try {
-            // Remove Layer 2 (system key from URL)
-            byte[] intermediate       = keyService.decrypt(secret.getData(), key);
+		// 7. Build response
+		int    total       = finalData.length;
+		String contentType = secret.getContentType();
+		String disposition = "inline; filename=\"" + secret.getFileName() + "\"";
+		boolean isMedia    = contentType.startsWith("audio/") || contentType.startsWith("video/");
 
-            // Remove Layer 1 (optional password)
-            if (secret.getSalt() != null) {
-                SecretKey passwordKey = keyService.deriveKeyFromPassword(dataAccessPassword, secret.getSalt());
-                finalData             = keyService.decrypt(intermediate, passwordKey);
-            } else {
-                finalData           = intermediate;
-            }
-        }
-		catch (Exception e) {
-            throw new RuntimeException("Decryption failed. Wrong password or corrupted link.");
-        }
+		// Range request — audio/video seeking
+		if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+			String[] bounds = rangeHeader.substring(6).split("-");
+			int start = Integer.parseInt(bounds[0]);
+			int end   = (bounds.length > 1 && !bounds[1].isEmpty())
+			? Integer.parseInt(bounds[1])
+			: total - 1;
+			end = Math.min(end, total - 1);
 
-        // 6. First access — start burn timer and notify sender only once
-        if (secret.getBurnAt() == null) {
-            secret.setIsViewed(true);
-            secret.setBurnAt(secret.getExpiredAt());
-            secretRepository.save(secret);
+			byte[] chunk        = Arrays.copyOfRange(finalData, start, end + 1);
+			boolean isFinalChunk = (end == total - 1);
 
-            // Notify sender only on first access, not on every view within the burn window
-            if (sender.getEmail() != null && !sender.getEmail().isBlank()) {
-                emailService.sendAccessNotificationEmail(sender.getEmail(), secret.getFileName());
-				User managedSender = secret.getSender();  // JPA-managed entity
-				managedSender.addNotification(keyService.encrypt(
-					"Your file was accessed by " + receiver.getUsername()
-				));
-				userRepository.save(managedSender);
-            }
-        }
+			if (isFinalChunk) {
+				secretRepository.delete(secret);
+			}
 
-        // 7. Build response — with HTTP 206 Range support for audio/video seeking
-        int    total       = finalData.length;
-        String contentType = secret.getContentType();
-        String disposition = "inline; filename=\"" + secret.getFileName() + "\"";
+			return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+			.header(HttpHeaders.CONTENT_DISPOSITION, disposition)
+			.header(HttpHeaders.ACCEPT_RANGES, "bytes")
+			.header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + total)
+			.header(HttpHeaders.CONTENT_LENGTH, String.valueOf(chunk.length))
+			.contentType(Media Type.parseMediaType(contentType))
+			.body(chunk);
+		}
 
-        if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-            String[] bounds = rangeHeader.substring(6).split("-");
-            int start = Integer.parseInt(bounds[0]);
-            int end   = (bounds.length > 1 && !bounds[1].isEmpty())
-                    ? Integer.parseInt(bounds[1])
-                    : total - 1;
-            end = Math.min(end, total - 1); // clamp — browser sometimes overshoots
+		// Full response — delete immediately
+		secretRepository.delete(secret);
 
-            byte[] chunk = Arrays.copyOfRange(finalData, start, end + 1);
+		return ResponseEntity.ok()
+		.header(HttpHeaders.CONTENT_DISPOSITION, disposition)
+		.header(HttpHeaders.ACCEPT_RANGES, "bytes")
+		.header(HttpHeaders.CONTENT_LENGTH, String.valueOf(total))
+		.contentType(MediaType.parseMediaType(contentType))
+		.body(finalData);
+	}
 
-            return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
-                    .header(HttpHeaders.CONTENT_DISPOSITION, disposition)
-                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
-                    .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + total)
-                    .header(HttpHeaders.CONTENT_LENGTH, String.valueOf(chunk.length))
-                    .contentType(MediaType.parseMediaType(contentType))
-                    .body(chunk);
-        }
-
-        // Full response
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_DISPOSITION, disposition)
-                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
-                .header(HttpHeaders.CONTENT_LENGTH, String.valueOf(total))
-                .contentType(MediaType.parseMediaType(contentType))
-                .body(finalData);
-    }
 }
