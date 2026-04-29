@@ -23,6 +23,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import com.zamipter.EphemeralSharingService.dto.SecretResponse;
 import com.zamipter.EphemeralSharingService.exception.FileTooLargeException;
@@ -330,7 +331,7 @@ public class EphemeralController {
 
 	@Transactional
 	@GetMapping("/secret/{key}")
-	public ResponseEntity<?> download(
+	public ResponseEntity<StreamingResponseBody> download(
 		@PathVariable("key")                                          String key,
 		@RequestParam(value = "password", required = false)          String dataAccessPassword,
 		@RequestHeader(value = HttpHeaders.RANGE, required = false)  String rangeHeader,
@@ -343,46 +344,49 @@ public class EphemeralController {
 			throw new RateLimitException("Too many attempts.");
 		}
 
-		// 2. Lookup — atomic claim
+		// 2. Lookup
 		String hid = keyService.hashKey(key);
 		EphemeralSecret secret = secretRepository.findById(hid).orElse(null);
 
 		if (secret == null) {
 			return ResponseEntity.status(HttpStatus.GONE)
-			.body("This link has already been used or does not exist.");
+			.body(out -> out.write("Link already used or does not exist.".getBytes()));
 		}
 
 		if (Boolean.TRUE.equals(secret.getIsViewed())) {
 			secretRepository.delete(secret);
 			return ResponseEntity.status(HttpStatus.GONE)
-			.body("This link has already been used.");
+			.body(out -> out.write("This link has already been used.".getBytes()));
 		}
 
-		// Claim it immediately before anything else
+		// Claim immediately — prevents race condition on concurrent access
 		secret.setIsViewed(true);
 		secretRepository.saveAndFlush(secret);
 
-		// 3. Hard expiry check
+		// 3. Hard expiry
 		if (LocalDateTime.now().isAfter(secret.getExpiredAt())) {
 			secretRepository.delete(secret);
-			return ResponseEntity.status(HttpStatus.GONE).body("This link has expired.");
+			return ResponseEntity.status(HttpStatus.GONE)
+			.body(out -> out.write("This link has expired.".getBytes()));
 		}
 
 		// 4. Password gate
 		if (secret.getSalt() != null && (dataAccessPassword == null || dataAccessPassword.isBlank())) {
 			if (userAgent != null && userAgent.contains("zsafer-cli")) {
 				return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-				.body("Password required. Retry with ?password=<value>");
+				.body(out -> out.write("Password required. Retry with ?password=<value>".getBytes()));
 			}
 			String html = "<html><body><script>" +
 			"var p=prompt('This file is password protected. Enter password:');" +
 			"if(p){window.location.search='password='+encodeURIComponent(p);}" +
 			"else{document.body.innerText='Access cancelled.';}" +
 			"</script></body></html>";
-			return ResponseEntity.ok().contentType(MediaType.TEXT_HTML).body(html.getBytes());
+			return ResponseEntity.ok()
+			.contentType(MediaType.TEXT_HTML)
+			.body(out -> out.write(html.getBytes()));
 		}
 
-		// 5. Decrypt
+		// 5. Decrypt — AES-GCM requires full decryption before output
 		User sender   = userService.decryptUser(secret.getSender());
 		User receiver = userService.decryptUser(secret.getReceiver());
 
@@ -399,23 +403,25 @@ public class EphemeralController {
 			throw new RuntimeException("Decryption failed. Wrong password or corrupted link.");
 		}
 
-		// 6. Notify sender on first (and only) access
+		// 6. Notify sender — first and only access
 		if (sender.getEmail() != null && !sender.getEmail().isBlank()) {
 			emailService.sendAccessNotificationEmail(sender.getEmail(), secret.getFileName());
 			User managedSender = secret.getSender();
-			managedSender.addNotification(keyService.encrypt(
-				"Your file was accessed by " + receiver.getUsername()
-			));
+			managedSender.addNotification(
+				keyService.encrypt("Your file was accessed by " + receiver.getUsername())
+			);
 			userRepository.save(managedSender);
 		}
 
-		// 7. Build response
+		// 7. Build streaming response
 		int    total       = finalData.length;
 		String contentType = secret.getContentType();
 		String disposition = "inline; filename=\"" + secret.getFileName() + "\"";
-		boolean isMedia    = contentType.startsWith("audio/") || contentType.startsWith("video/");
 
-		// Range request — audio/video seeking
+		// Capture for use inside lambda (must be effectively final)
+		EphemeralSecret managedSecret = secret;
+
+		// Range request — browser asking for a specific chunk (video/audio seek)
 		if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
 			String[] bounds = rangeHeader.substring(6).split("-");
 			int start = Integer.parseInt(bounds[0]);
@@ -424,31 +430,48 @@ public class EphemeralController {
 			: total - 1;
 			end = Math.min(end, total - 1);
 
-			byte[] chunk        = Arrays.copyOfRange(finalData, start, end + 1);
-			boolean isFinalChunk = (end == total - 1);
+			int rangeStart = start;
+			int rangeEnd   = end;
 
-			if (isFinalChunk) {
-				secretRepository.delete(secret);
-			}
+			// StreamingResponseBody writes this chunk directly to the socket
+			StreamingResponseBody stream = out -> {
+				out.write(finalData, rangeStart, rangeEnd - rangeStart + 1);
+				out.flush();
+				// Delete only when the last chunk is sent
+				if (rangeEnd == total - 1) {
+					secretRepository.delete(managedSecret);
+				}
+			};
 
 			return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
 			.header(HttpHeaders.CONTENT_DISPOSITION, disposition)
 			.header(HttpHeaders.ACCEPT_RANGES, "bytes")
 			.header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + total)
-			.header(HttpHeaders.CONTENT_LENGTH, String.valueOf(chunk.length))
+			.header(HttpHeaders.CONTENT_LENGTH, String.valueOf(end - start + 1))
 			.contentType(MediaType.parseMediaType(contentType))
-			.body(chunk);
+			.body(stream);
 		}
 
-		// Full response — delete immediately
-		secretRepository.delete(secret);
+		// Full file — stream in 64KB chunks then delete
+		int CHUNK_SIZE = 64 * 1024; // 64 KB
+
+		StreamingResponseBody stream = out -> {
+			int offset = 0;
+			while (offset < finalData.length) {
+				int len = Math.min(CHUNK_SIZE, finalData.length - offset);
+				out.write(finalData, offset, len);
+				out.flush();  // push each chunk to the client immediately
+				offset += len;
+			}
+			secretRepository.delete(managedSecret);
+		};
 
 		return ResponseEntity.ok()
 		.header(HttpHeaders.CONTENT_DISPOSITION, disposition)
 		.header(HttpHeaders.ACCEPT_RANGES, "bytes")
 		.header(HttpHeaders.CONTENT_LENGTH, String.valueOf(total))
 		.contentType(MediaType.parseMediaType(contentType))
-		.body(finalData);
+		.body(stream);
 	}
 
 }
