@@ -20,3 +20,20 @@ find receiver using toEmail
 	ii) if not , give bad request
 
 
+zam
+zamipter@gmail
+
+usernameHash	82e4f62b02330f8eb8a734f7ae759c91a6afb8469079722937d8ac5a1717183a
+message	User created successfully
+token	301d0fbd-e677-4dd4-9eca-395fbd8c5f0d
+
+
+mano
+manovishal.og@protonmail.com
+
+usernameHash	3ebf7a087f79ad7fb361e356b99d3f4a7b6916d7cb8e950be6e2bcb971daa6c6
+message	Account created. Store your token — it cannot be recovered.
+token	bb3e2e0b-5840-4fd2-b2eb-94ff3a6a3a6e
+
+
+txt xiY2rKNKtxDngldiQXKKqAl3u7pt1rrIquQwKy3TA4w

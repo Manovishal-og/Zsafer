@@ -62,7 +62,7 @@ public class EmailService {
 		SimpleMailMessage message = new SimpleMailMessage();
 		message.setTo(email);
 		message.setSubject("New Zsafer Account is created ");
-		message.setText("Your username : "+userName+"\n Your Password : "+password);
+		message.setText("Your username : "+userName+". \n" );
 		mailSender.send(message);
 	}
 }

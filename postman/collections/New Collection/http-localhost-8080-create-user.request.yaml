@@ -1,0 +1,12 @@
+$kind: http-request
+name: http://localhost:8080/create/user
+url: http://localhost:8080/create/user
+method: POST
+body:
+  type: json
+  content: |-
+    {
+        "username" : "mano",
+        "email" : "manovishal.og@protonmail.com"
+    }
+order: 1777463796532

@@ -2,17 +2,17 @@ package com.zamipter.EphemeralSharingService.controller;
 
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
-import java.util.Set;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import java.util.Set;
+
+import javax.crypto.SecretKey;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.MediaTypeFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -23,9 +23,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
-import org.springframework.web.multipart.support.MissingServletRequestPartException;
 
-import javax.crypto.SecretKey;
 import com.zamipter.EphemeralSharingService.dto.SecretResponse;
 import com.zamipter.EphemeralSharingService.exception.FileTooLargeException;
 import com.zamipter.EphemeralSharingService.exception.RateLimitException;
@@ -33,314 +31,409 @@ import com.zamipter.EphemeralSharingService.model.EphemeralSecret;
 import com.zamipter.EphemeralSharingService.model.User;
 import com.zamipter.EphemeralSharingService.repository.SecretRepository;
 import com.zamipter.EphemeralSharingService.repository.UserRepository;
+import com.zamipter.EphemeralSharingService.service.ApiRateLimiting;
 import com.zamipter.EphemeralSharingService.service.EmailService;
 import com.zamipter.EphemeralSharingService.service.KeyGenerationService;
 import com.zamipter.EphemeralSharingService.service.UserService;
-import com.zamipter.EphemeralSharingService.service.ApiRateLimiting;
+
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
-/**
- * EphemeralController - Manages secure, burn-on-read file sharing.
- */
 @RestController
 public class EphemeralController {
 
-	private static final Set<String> allowedExtension = Set.of("pdf", "jpg", "png", "docx", "mp3", "mp4", "txt");
-	private static final long MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
+    private static final Set<String> ALLOWED_EXTENSIONS =
+            Set.of("pdf", "jpg", "jpeg", "png", "docx", "mp3", "mp4", "txt");
+    private static final long MAX_FILE_SIZE = 100L * 1024 * 1024; // 100 MB
 
-	@Autowired
-	private KeyGenerationService keyService;
+    @Autowired private KeyGenerationService keyService;
+    @Autowired private ApiRateLimiting      rateLimitingService;
+    @Autowired private SecretRepository     secretRepository;
+    @Autowired private UserRepository       userRepository;
+    @Autowired private EmailService         emailService;
+    @Autowired private UserService          userService;
 
-	@Autowired
-	private ApiRateLimiting rateLimitingService;
+    // =========================================================================
+    //  POST /create/user
+    //
+    //  No password — apiToken is the only credential.
+    //  Both username and email are encrypted with the server key.
+    //  usernameHash and emailHash are stored for lookups.
+    //  apiToken is hashed before storing — raw token returned to client once.
+    // =========================================================================
 
-	@Autowired
-	private SecretRepository secretRepository;
+    @PostMapping("/create/user")
+    public ResponseEntity<?> createUser(@RequestBody Map<String, String> payload) {
+        try {
+            String username = payload.get("username");
+            String email    = payload.get("email");
 
-	@Autowired
-	private UserRepository userRepository;
+            if (username == null || username.isBlank() ||
+                email    == null || email.isBlank()) {
+                return ResponseEntity.badRequest()
+                        .body("Missing required fields: username, email.");
+            }
 
-	@Autowired
-	private EmailService emailService;
+            // SHA-256 hashes for lookup — safe to store, not reversible
+            String usernameHash = keyService.hashKey(username);
+            String emailHash    = keyService.hashKey(email);
 
-	@Autowired
-	private UserService userService;
+            // Check uniqueness before persisting
+            if (userRepository.findByUsernameHash(usernameHash).isPresent()) {
+                return ResponseEntity.status(HttpStatus.CONFLICT)
+                        .body("Username already taken.");
+            }
+            if (userRepository.findByEmailHash(emailHash).isPresent()) {
+                return ResponseEntity.status(HttpStatus.CONFLICT)
+                        .body("Email already registered.");
+            }
 
-	@PostMapping("/create/user")
-	public ResponseEntity<?> createUser(@RequestBody Map<String, String> payload) {
-		try {
-			String username = payload.get("username");
-			String email = payload.get("email");
+            // Raw token returned to client — client must store it safely.
+            // Hashed token stored in DB so a DB breach cannot replay tokens.
+            String apiToken = java.util.UUID.randomUUID().toString();
 
-			if (username == null || email == null) {
-				return ResponseEntity.badRequest().body("Missing required fields");
-			}
+            User newUser = new User();
+            newUser.setUsernameHash(usernameHash);
+            newUser.setEmailHash(emailHash);
+            newUser.setApiToken(keyService.hashKey(apiToken)); // stored as hash
 
-			emailService.greetUserEmail( email ,  username );
-			String notification = "New Account is created in zsafer ";
+            // Both username and email are PII — encrypt with server key
+            newUser.setUsername(keyService.encrypt(username));
+            newUser.setEmail(keyService.encrypt(email));
 
-			// 1. Generate Shadow Hashes (SHA-256) for database searching
-			String usernameHash = keyService.hashKey(username);
-			String apiToken = java.util.UUID.randomUUID().toString();
-
-
-			// 2. Persist the User
-			User newUser = new User();
-			newUser.setUsernameHash(usernameHash);
-			newUser.setUsername(keyService.encrypt(username));
-
-			newUser.setEmail(keyService.encrypt(email));
-			newUser.setEmailHash(keyService.hashKey(email));
-			newUser.setApiToken(keyService.hashKey(apiToken));
-			newUser.addNotification(keyService.encrypt(notification));
-			userRepository.save(newUser);
-
-			Map<String, String> response = new java.util.HashMap<>();
-			response.put("message", "User created successfully");
-			response.put("token", apiToken);
-			response.put("usernameHash", usernameHash);
-
-			return ResponseEntity.status(HttpStatus.CREATED).body(response);
-
-		} catch (Exception e) {
-			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-			.body("Registration failed: " + e.getMessage());
-		}
-	}
-
+            // First notification — encrypted before storing
+            newUser.addNotification(keyService.encrypt("Welcome to Zsafer!"));
 
 
+            userRepository.save(newUser);
 
-	@GetMapping("/{usernamehash}/message")
-	public ResponseEntity<?> accessNotification(@PathVariable String usernameHash , @RequestBody Map<String, String> payload){
-		try{
+            // Send welcome email using plaintext values (before they leave scope)
+            emailService.greetUserEmail(email, username);
 
-			String apiToken = payload.get("apitoken");
-			if (usernameHash == null || apiToken == null ) {
-				return ResponseEntity.badRequest().body("Missing required fields");
-			}
+            Map<String, String> response = new java.util.HashMap<>();
+            response.put("message", "Account created. Store your token — it cannot be recovered.");
+            response.put("token", apiToken);           // raw token, shown once
+            response.put("usernameHash", usernameHash);
 
-			User searchedUser = userService.validateUserSession(apiToken, usernameHash);
-			User decryptedUser = userService.decryptUser(searchedUser);
-			List<String> notification = decryptedUser.getNotification();
-			return ResponseEntity.ok(notification);
-		}
+            return ResponseEntity.status(HttpStatus.CREATED).body(response);
 
-		catch (RuntimeException e) {
-			return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(e.getMessage());
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Registration failed: " + e.getMessage());
+        }
+    }
 
-		}
+    // =========================================================================
+    //  GET /{usernamehash}/message
+    //
+    //  Client sends their apiToken as a query param.
+    //  validateUserSession hashes it and matches against DB.
+    //  decryptUser decrypts the notification list before returning.
+    // =========================================================================
 
-		catch(Exception e){
-			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                             .body("Error retrieving messages: " + e.getMessage());
-		}
-		
-	}
+    @GetMapping("/{usernamehash}/message")
+    public ResponseEntity<?> accessNotification(
+            @PathVariable("usernamehash") String usernameHash,
+            @RequestParam("apitoken")     String apiToken) {
+        try {
+            User searchedUser  = userService.validateUserSession(apiToken, usernameHash);
+            User decryptedUser = userService.decryptUser(searchedUser);
+            return ResponseEntity.ok(decryptedUser.getNotification());
 
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(e.getMessage());
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error retrieving messages: " + e.getMessage());
+        }
+    }
 
-	@DeleteMapping("/{usernamehash}/clear")
-	public ResponseEntity<?> deleteAllNotification(@PathVariable String usernameHash , @RequestBody Map<String, String> payload ){
-		try{
-			String apiToken = payload.get("apitoken");
-			if ( apiToken == null ) {
-				return ResponseEntity.badRequest().body("Missing required fields");
-			}
-			User searchedUser = userService.validateUserSession(apiToken, usernameHash);
-			searchedUser.deleteViewedNotification();
-			userRepository.save(searchedUser);
-			return ResponseEntity.ok("Viewed notifications cleared successfully.");
-		} 
+    // =========================================================================
+    //  DELETE /{usernamehash}/clear
+    //
+    //  Clears all notifications for the authenticated user.
+    //  Operates on the JPA-managed entity directly — no decrypt needed.
+    // =========================================================================
 
-		catch(RuntimeException e){
-			return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-				 .body("Invalid credentials or session expired.");
+    @DeleteMapping("/{usernamehash}/clear")
+    public ResponseEntity<?> deleteAllNotification(
+            @PathVariable("usernamehash") String usernameHash,
+            @RequestBody Map<String, String> payload) {
+        try {
+            String apiToken = payload.get("apitoken");
+            if (apiToken == null || apiToken.isBlank()) {
+                return ResponseEntity.badRequest().body("Missing required field: apitoken.");
+            }
 
-		}
+            // Operates on the raw DB entity — no decryption needed for clearing
+            User searchedUser = userService.validateUserSession(apiToken, usernameHash);
+            searchedUser.clearNotifications();
+            userRepository.save(searchedUser);
+
+            return ResponseEntity.ok("Notifications cleared successfully.");
+
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body("Invalid credentials or session expired.");
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error clearing notifications: " + e.getMessage());
+        }
+    }
+
+    // =========================================================================
+    //  POST /secret   (multipart/form-data)
+    //
+    //  Encryption layers:
+    //    Layer 1 (optional): PBKDF2 key from dataAccessPassword
+    //    Layer 2 (mandatory): random AES-256 key that lives only in the URL
+    //
+    //  Sender email is double-encrypted and stored in EphemeralSecret
+    //  so the download endpoint can notify the sender without the DB
+    //  ever seeing plaintext.
+    //
+    //  IMPORTANT: notifications and FK relationships always use the
+    //  JPA-managed entity (receiver / validatedSender), never the
+    //  decrypted transient copy — saving a decrypted copy would write
+    //  plaintext PII back to the database.
+    // =========================================================================
+
+    @PostMapping("/secret")
+    public ResponseEntity<?> uploadSecret(
+            @RequestParam("file")                                         MultipartFile file,
+            @RequestParam("expiry")                                       int           expirySeconds,
+            @RequestParam(value = "dataAccessPassword", required = false) String        dataAccessPassword,
+            @RequestParam("duration")                                     int           duration,
+            @RequestParam("receiverEmail")                                String        receiverEmail,
+            @RequestParam("sender")                                       String        senderUsernameHash,
+            @RequestParam("apitoken")                                     String        apiToken,
+            HttpServletRequest request) throws Exception {
+
+        // 1. Rate limit
+        if (!rateLimitingService.checkRequestAvailable(request.getRemoteAddr())) {
+            throw new RateLimitException("Too many uploads. Try later.");
+        }
+
+        // 2. Validate sender
+        // validatedSender = JPA-managed entity (used for FK + save)
+        // decryptedSender = transient copy with plaintext fields (used to read values)
+        User validatedSender = userService.validateUserSession(apiToken, senderUsernameHash);
+        User decryptedSender = userService.decryptUser(validatedSender);
+
+        // 3. Find receiver
+        // receiver          = JPA-managed entity (used for FK + save)
+        // decryptedReceiver = transient copy with plaintext email (used for sending email)
+        String receiverHash    = keyService.hashKey(receiverEmail);
+        User receiver          = userRepository.findByEmailHash(receiverHash)
+                .orElseThrow(() -> new RuntimeException("Receiver not found in Zsafer."));
+        User decryptedReceiver = userService.decryptUser(receiver);
+
+        // 4. File validation
+        String fileName = file.getOriginalFilename();
+        if (fileName == null || !fileName.contains(".")) {
+            return ResponseEntity.badRequest().body("Invalid file name.");
+        }
+        if (file.getSize() > MAX_FILE_SIZE) {
+            throw new FileTooLargeException("Max 100MB allowed.");
+        }
+        String extension = fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase();
+        if (!ALLOWED_EXTENSIONS.contains(extension)) {
+            return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
+                    .body("Unsupported file type: ." + extension);
+        }
+
+        // 5. Read file bytes
+        byte[] data = file.getBytes();
+        byte[] salt = null;
+
+        // Sender email starts as plaintext — will be wrapped through both layers
+        String senderEmailForStorage = decryptedSender.getEmail();
+
+        // 6. Layer 1: optional password encryption
+        if (dataAccessPassword != null && !dataAccessPassword.isBlank()) {
+            salt = new byte[16];
+            new SecureRandom().nextBytes(salt);
+            SecretKey passwordKey = keyService.deriveKeyFromPassword(dataAccessPassword, salt);
+
+            // Encrypt file data with password key
+            data = keyService.encrypt(data, passwordKey);
+
+            // Wrap sender email through password layer too —
+            // receiver must know the password to reveal who sent the file
+            senderEmailForStorage = keyService.encrypt(senderEmailForStorage, passwordKey);
+        }
+
+        // 7. Layer 2: system key — generated fresh per upload, lives only in the URL
+        SecretKey systemKey  = keyService.getSecretKey();
+        String    accessKey  = keyService.convertToBase64(systemKey); // returned to sender
+        String    hashedId   = keyService.hashKey(accessKey);         // stored in DB as PK
+
+        byte[] finalEncrypted       = keyService.encrypt(data, systemKey);
+
+        // 8. Resolve MIME type
+        String contentType = MediaTypeFactory.getMediaType(fileName)
+                .map(MediaType::toString)
+                .orElse("application/octet-stream");
+
+        // 9. Persist secret
+        LocalDateTime now    = LocalDateTime.now();
+        LocalDateTime expiry = now.plusSeconds(expirySeconds);
+
+        EphemeralSecret secret = new EphemeralSecret();
+        secret.setId(hashedId);
+        secret.setData(finalEncrypted);
+        secret.setFileName(fileName);
+        secret.setContentType(contentType);
+        secret.setCreatedAt(now);
+        secret.setExpiredAt(expiry);
+        secret.setSalt(salt);
+        secret.setDuration(duration);
+        secret.setSender(validatedSender);            // JPA-managed entity — correct FK
+        secret.setReceiver(receiver);                 // JPA-managed entity — correct FK
+
+        secretRepository.save(secret);
+
+        // 10. Email the receiver — use decrypted email for actual sending
+        emailService.sendSecretNotificationEmail(
+                decryptedReceiver.getEmail(),
+                "/secret/" + accessKey,
+                expirySeconds,
+                dataAccessPassword
+		);
+
+        // 11. Add in-app notification to receiver
+        // IMPORTANT: add to `receiver` (JPA-managed entity), then save `receiver`.
+        // Never save `decryptedReceiver` — it holds plaintext email which would
+        // overwrite the encrypted value in the DB.
+        receiver.addNotification(
+                keyService.encrypt("New file from " + decryptedSender.getUsername())
+        );
+        userRepository.save(receiver);
+	
+
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(new SecretResponse("Uploaded successfully!", accessKey, expiry));
+    }
+
+    // =========================================================================
+    //  GET /secret/{key}
+    //
+    //  Burn-on-read with configurable burn window (duration seconds).
+    //  On first access: burn timer starts.
+    //  While inside burn window: file is served (supports HTTP Range for video).
+    //  After burnAt: CleanupService scheduler deletes the row.
+    //
+    //  Sender email is decrypted only at download time — never stored plaintext.
+    //  Sender is notified ONCE (on first access), not on every subsequent view.
+    // =========================================================================
+
+    @GetMapping("/secret/{key}")
+    public ResponseEntity<?> download(
+            @PathVariable("key")                                          String key,
+            @RequestParam(value = "password", required = false)          String dataAccessPassword,
+            @RequestHeader(value = HttpHeaders.RANGE, required = false)  String rangeHeader,
+            @RequestHeader(value = HttpHeaders.USER_AGENT, required = false) String userAgent,
+            HttpServletRequest request,
+            HttpServletResponse httpResponse) throws Exception {
+
+        // 1. Rate limit
+        if (!rateLimitingService.checkRequestAvailable(request.getRemoteAddr())) {
+            throw new RateLimitException("Too many attempts.");
+        }
+
+        // 2. Lookup
+        String          hid    = keyService.hashKey(key);
+        EphemeralSecret secret = secretRepository.findById(hid)
+                .orElseThrow(() -> new RuntimeException("Secret not found or already burned."));
+		User sender = userService.decryptUser(secret.getSender());
+		User receiver = userService.decryptUser(secret.getReceiver());
+
+        // 3. Password gate — single check, placed before expiry check
+        if (secret.getSalt() != null && (dataAccessPassword == null || dataAccessPassword.isBlank())) {
+            if (userAgent != null && userAgent.contains("zsafer-cli")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                        .body("Password required. Retry with ?password=<value>");
+            }
+            String html = "<html><body><script>" +
+                    "var p=prompt('This file is password protected. Enter password:');" +
+                    "if(p){window.location.search='password='+encodeURIComponent(p);}" +
+                    "else{document.body.innerText='Access cancelled.';}" +
+                    "</script></body></html>";
+            return ResponseEntity.ok().contentType(MediaType.TEXT_HTML).body(html.getBytes());
+        }
+
+        // 4. Burn-window check
+        if (secret.getBurnAt() != null && LocalDateTime.now().isAfter(secret.getBurnAt())) {
+            secretRepository.delete(secret);
+            throw new RuntimeException("Secret has expired and been burned.");
+        }
+
+        // 5. Decryption — remove Layer 2, then Layer 1
+        byte[] finalData;
+        String originalSenderEmail = "";
+        try {
+            // Remove Layer 2 (system key from URL)
+            byte[] intermediate       = keyService.decrypt(secret.getData(), key);
+
+            // Remove Layer 1 (optional password)
+            if (secret.getSalt() != null) {
+                SecretKey passwordKey = keyService.deriveKeyFromPassword(dataAccessPassword, secret.getSalt());
+                finalData             = keyService.decrypt(intermediate, passwordKey);
+            } else {
+                finalData           = intermediate;
+            }
+        }
 		catch (Exception e) {
-			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-								 .body("Error clearing messages: " + e.getMessage());
-		}
+            throw new RuntimeException("Decryption failed. Wrong password or corrupted link.");
+        }
 
-	}
+        // 6. First access — start burn timer and notify sender only once
+        if (secret.getBurnAt() == null) {
+            secret.setIsViewed(true);
+            secret.setBurnAt(secret.getExpiredAt());
+            secretRepository.save(secret);
 
-	@PostMapping("/secret")
-	public ResponseEntity<?> uploadSecret(
-		@RequestParam("file") MultipartFile file,
-		@RequestParam("expiry") int seconds,
-		@RequestParam(value = "dataAccessPassword", required = false) String dataAccessPassword,
-		@RequestParam(value = "duration") Integer duration,
-		@RequestParam(value = "receiverEmail" ) String receiverEmail,
-		@RequestParam(value = "sender" ) String senderUsernameHash,
-		@RequestParam(value = "apitoken") String apiToken,
-		HttpServletRequest request
-	) throws Exception {
+            // Notify sender only on first access, not on every view within the burn window
+            if (sender.getEmail() != null && !sender.getEmail().isBlank()) {
+                emailService.sendAccessNotificationEmail(sender.getEmail(), secret.getFileName());
+				User managedSender = secret.getSender();  // JPA-managed entity
+				managedSender.addNotification(keyService.encrypt(
+					"Your file was accessed by " + receiver.getUsername()
+				));
+				userRepository.save(managedSender);
+            }
+        }
 
-		// 1. Rate Limiting
-		if (!rateLimitingService.checkRequestAvailable(request.getRemoteAddr())) {
-			throw new RateLimitException("Slow down! You've reached your upload limit.");
-		}
+        // 7. Build response — with HTTP 206 Range support for audio/video seeking
+        int    total       = finalData.length;
+        String contentType = secret.getContentType();
+        String disposition = "inline; filename=\"" + secret.getFileName() + "\"";
 
-		
-		// 2. Validation
-		String receiverEmailHash = keyService.hashKey(receiverEmail);
-		User validatedReceiver = userRepository.findByEmailHash(receiverEmailHash)
-				.orElseThrow(() -> new RuntimeException("No user exists with that email in zsafer"));
-		String toEmail = validatedReceiver.getEmail();
-		User validatedSender = userService.validateUserSession(apiToken, senderUsernameHash);
+        if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+            String[] bounds = rangeHeader.substring(6).split("-");
+            int start = Integer.parseInt(bounds[0]);
+            int end   = (bounds.length > 1 && !bounds[1].isEmpty())
+                    ? Integer.parseInt(bounds[1])
+                    : total - 1;
+            end = Math.min(end, total - 1); // clamp — browser sometimes overshoots
 
-		String fileName = file.getOriginalFilename();
-		if (fileName == null || !fileName.contains(".")) {
-			return ResponseEntity.badRequest().body("Invalid file name.");
-		}
+            byte[] chunk = Arrays.copyOfRange(finalData, start, end + 1);
 
-		// Decrypt the validatedSender using apiToken
-		User decryptedSender = userService.decryptUser(validatedSender);
-		String extension = fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase();
-		if (!allowedExtension.contains(extension)) {
-			return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
-			.body("File type ." + extension + " is not allowed.");
-		}
+            return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+                    .header(HttpHeaders.CONTENT_DISPOSITION, disposition)
+                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                    .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + total)
+                    .header(HttpHeaders.CONTENT_LENGTH, String.valueOf(chunk.length))
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .body(chunk);
+        }
 
-		if (file.getSize() > MAX_FILE_SIZE) {
-			throw new FileTooLargeException("File exceeds 100MB limit.");
-		}
-
-
-		// 3. Layer 1 Encryption: User Password
-		byte[] currentData = file.getBytes();
-		byte[] salt = null;
-
-		if (dataAccessPassword != null && !dataAccessPassword.isBlank()) {
-			salt = new byte[16];
-			new java.security.SecureRandom().nextBytes(salt);
-			SecretKey passwordKey = keyService.deriveKeyFromPassword(dataAccessPassword, salt);
-			currentData = keyService.encrypt(currentData, passwordKey);
-		}
-
-		// 4. Layer 2 Encryption: System Key (Lives only in URL)
-		SecretKey systemKey = keyService.getSecretKey();
-		String id = keyService.convertToBase64(systemKey);
-		String hid = keyService.hashKey(id);
-		byte[] finalEncryptedData = keyService.encrypt(currentData, systemKey);
-
-		// 5. Metadata and Storage
-		String type = org.springframework.http.MediaTypeFactory
-		.getMediaType(fileName)
-		.map(MediaType::toString)
-		.orElse("application/octet-stream");
-
-		LocalDateTime eTime = LocalDateTime.now().plusSeconds(seconds);
-
-		secretRepository.save(new EphemeralSecret(
-			hid, finalEncryptedData, fileName, LocalDateTime.now(), 
-			eTime, type, salt, duration , decryptedSender 
-		));
-
-		// 6. Notify Receiver
-		emailService.sendSecretNotificationEmail(toEmail, id, seconds, dataAccessPassword);
-		String notificationMessage = "You have received a new file from " + decryptedSender.getUsername();
-		if (validatedReceiver.getApiToken() != null) {
-			String encryptedNotification = keyService.encrypt(notificationMessage, validatedReceiver.getApiToken());
-			validatedReceiver.addNotification(encryptedNotification);
-			userRepository.save(validatedReceiver);
-		}
-
-		return ResponseEntity.status(HttpStatus.CREATED).body(new SecretResponse("File Uploaded successfully!", id, eTime));
-	}
-
-	@GetMapping(path = "/secret/{key}")
-	public ResponseEntity<?> download(
-		@PathVariable("key") String key,
-		@RequestParam(value = "password", required = false) String password,
-		@RequestHeader(value = HttpHeaders.RANGE, required = false) String rangeHeader,
-		@RequestHeader(value = HttpHeaders.USER_AGENT, required = false) String userAgent,
-		HttpServletRequest request,
-		HttpServletResponse httpResponse
-	) throws Exception {
-
-		// 1. Rate Limiting
-		if (!rateLimitingService.checkRequestAvailable(request.getRemoteAddr())) {
-			throw new RateLimitException("Too many attempts.");
-		}
-
-		// 2. Repository Lookup
-		String hid = keyService.hashKey(key);
-		EphemeralSecret secret = secretRepository.findById(hid)
-		.orElseThrow(() -> new RuntimeException("Secret not found or already burned."));
-
-		// 3. Password Check / Gatekeeper
-		if (secret.getSalt() != null && (password == null || password.isBlank())) {
-			// If request comes from CLI, return 401 instead of HTML
-			if (userAgent != null && userAgent.contains("zsafer-cli")) {
-				return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Password Required");
-			}
-
-			String html = "<html><body><script>" +
-			"var p = prompt('This file is password protected. Enter Password:');" +
-			"if(p) { window.location.search = 'password=' + encodeURIComponent(p); }" +
-			"</script></body></html>";
-			return ResponseEntity.ok().contentType(MediaType.TEXT_HTML).body(html.getBytes());
-		}
-
-		// 4. Burn-window Check
-		if (secret.getBurnAt() != null && LocalDateTime.now().isAfter(secret.getBurnAt())) {
-			secretRepository.delete(secret);
-			throw new RuntimeException("Secret has expired.");
-		}
-
-		// Handle Password Gate for CLI
-		if (secret.getSalt() != null && (password == null || password.isBlank())) {
-			if (userAgent != null && userAgent.contains("zsafer-cli")) {
-				return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Password Required");
-			}
-			// HTML for Browser users
-			return ResponseEntity.ok().contentType(MediaType.TEXT_HTML).body("...JS Prompt...".getBytes());
-		}
-
-		// 5. Decryption
-		byte[] finalData;
-		String originalSenderEmail = "";
-		try {
-			// System Layer
-			byte[] intermediate = keyService.decrypt(secret.getData(), key);
-			String partialSenderEmail = keyService.decryptStringWithString(secret.getSenderEmail(), key);
-
-			// Password Layer
-			if (secret.getSalt() != null) {
-				SecretKey passwordKey = keyService.deriveKeyFromPassword(password, secret.getSalt());
-				finalData = keyService.decrypt(intermediate, passwordKey);
-				if (partialSenderEmail != null && !partialSenderEmail.isEmpty()) {
-					originalSenderEmail = keyService.decrypt(partialSenderEmail, passwordKey);
-				}
-			} else {
-				finalData = intermediate;
-				originalSenderEmail = partialSenderEmail;
-			}
-		} catch (Exception e) {
-			throw new RuntimeException("Decryption failed. Wrong password or corrupted link.");
-		}
-
-		// 6. Access Notification
-		if (originalSenderEmail != null && !originalSenderEmail.isBlank()) {
-			emailService.sendAccessNotificationEmail(originalSenderEmail, secret.getFileName());
-		}
-
-		// 7. Initial Access: Start the Burn Timer
-		if (secret.getBurnAt() == null) {
-			secret.setIsViewed(true);
-			if (secret.getDuration() != -1) {
-				secret.setBurnAt(LocalDateTime.now().plusSeconds(secret.getDuration()));
-			}
-			secretRepository.save(secret);
-		}
-
-
-		// Standard Response
-		return ResponseEntity.ok()
-		.header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + secret.getFileName() + "\"")
-		.contentType(MediaType.parseMediaType(secret.getContentType()))
-		.body(finalData);
-	}
+        // Full response
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, disposition)
+                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                .header(HttpHeaders.CONTENT_LENGTH, String.valueOf(total))
+                .contentType(MediaType.parseMediaType(contentType))
+                .body(finalData);
+    }
 }

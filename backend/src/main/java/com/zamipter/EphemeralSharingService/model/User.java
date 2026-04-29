@@ -29,10 +29,10 @@ public class User {
     @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "user_notifications", joinColumns = @JoinColumn(name = "user_id"))
     @Column(name = "notification", columnDefinition = "TEXT")
-    private List<String> notification; 
+    private List<String> notification = new ArrayList<>(); 
 
-	@OneToMany(mappedBy = "sender", cascade = CascadeType.ALL, orphanRemoval = true)
-	private List<EphemeralSecret> mySecrets;
+@OneToMany(mappedBy = "sender", cascade = CascadeType.ALL, orphanRemoval = true)
+private List<EphemeralSecret> mySecrets;
 
 	public User() {}
 

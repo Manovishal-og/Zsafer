@@ -3,9 +3,11 @@ package com.zamipter.EphemeralSharingService.model;
 import java.time.LocalDateTime;
 
 import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Lob;
+import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Column;
 
 @Entity
@@ -30,14 +32,19 @@ public class EphemeralSecret {
 	private int duration;
 	private LocalDateTime burnAt;
 	
-@JoinColumn(name = "user_id")
-    private User user;
+@ManyToOne(fetch = FetchType.LAZY)
+@JoinColumn(name = "sender_id")
+private User sender;
+
+@ManyToOne(fetch = FetchType.LAZY)
+@JoinColumn(name = "receiver_id")
+private User receiver;
 
 
 	// Default Constructor is needed for Spring JPA
 	public EphemeralSecret() {}
 
-	public EphemeralSecret( String id ,  byte[] data , String fileName , LocalDateTime cTime , LocalDateTime eTime , String ContentType , byte[] salt, int duration , User user ){
+	public EphemeralSecret( String id ,  byte[] data , String fileName , LocalDateTime cTime , LocalDateTime eTime , String ContentType , byte[] salt, int duration , User sender , User receiver ){
 		this.id = id;
 		this.data = data;
 		this.fileName = fileName;
@@ -46,7 +53,8 @@ public class EphemeralSecret {
 		this.ContentType = ContentType;
 		this.salt = salt;
 		this.duration = duration;
-		this.user = user;
+		this.sender = sender;
+		this.receiver = receiver;
 	}
 
 	public String getId() { return id; }
@@ -79,8 +87,10 @@ public class EphemeralSecret {
 	public LocalDateTime getBurnAt(){ return burnAt;}
 	public void setBurnAt (LocalDateTime duration){ this.burnAt = duration;	}
 
-	public User getuser() { return user; }
-    public void setuser(User user) { this.user = user; }
+	public User getSender() { return sender; }
+    public void setSender(User user) { this.sender = user; }
 
 
+	public User getReceiver() { return receiver; }
+    public void setReceiver(User user) { this.receiver = user; }
 }
