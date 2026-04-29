@@ -436,7 +436,7 @@ public class EphemeralController {
 			.header(HttpHeaders.ACCEPT_RANGES, "bytes")
 			.header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + total)
 			.header(HttpHeaders.CONTENT_LENGTH, String.valueOf(chunk.length))
-			.contentType(Media Type.parseMediaType(contentType))
+			.contentType(MediaType.parseMediaType(contentType))
 			.body(chunk);
 		}
 
