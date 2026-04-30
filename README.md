@@ -39,9 +39,19 @@ A self-hostable, secure file-sharing service with zero-knowledge encryption and 
 
 ---
 
+
 ##  Use Cases
 
 - Secure file sharing
 - Temporary confidential transfers
 - Zero-trust environments
+
+---
+
+## Why this project?
+
+Zsafer was built to explore secure system design principles in real-world backend engineering — combining encryption, distributed responsibility, and efficient data transfer.
+
+
+---
 
